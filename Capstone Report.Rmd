@@ -1,0 +1,268 @@
+---
+title: "Capstone Project"
+author: "Daniel Albert"
+date: "3/20/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dslabs)
+library(caret)
+library(dplyr)
+library(rpart)
+library(randomForest)
+default_warning <- getOption("warn")
+options(warn = -1)
+```
+
+## Introduction
+
+In thinking about this project, I searched Kaggle for a promising dataset and found one entitled Student Performance in Exams by SPScientist (https://www.kaggle.com/spscientist/students-performance-in-exams). This dataset includes anonymous information on 1000 students including their gender, race category (the categories are not specific), highest level of parental education, whether or not they qualify for free/reduced lunches, whether or not they completed a preparatory course, and their scores on three exams: mathematics, reading, and writing. I wondered if we could use the demographic information to predict their performance on any/all of the exams. As a teacher, I know that there is a lot of discussion about "closing the gap" in performance between various subsets of students. While all teachers know of exceptions to these generalities, this is something that schools do look into and I was wondering if I could find a useful algorithm.
+
+## Preliminary Analysis
+
+After downloading the data, I split it into test and training sets, then further split the training set so that I could play around with things without testing against the sacred test set. I named my practice set "data" and my practice test set "further_test_set".
+
+```{r data setup}
+data_path <- "~/Capstone/StudentsPerformance.csv"
+data_original <- read.csv(data_path)
+set.seed(24)
+test_index <- createDataPartition(y = data_original$math.score, times = 1, p = .2, list = FALSE)
+train_set <- data_original[-test_index,]
+test_set <- data_original[test_index,]
+further_test_index <- createDataPartition(train_set$math.score, times = 1, p = .2, list = FALSE)
+further_test_set <- train_set[further_test_index,]
+data <- train_set[-further_test_index,]
+```
+
+Now that we have that set up, I did some exploring of data. I found the basic averages for each subject and stored this information. 
+```{r averages 1}
+mu_math <- mean(data$math.score)
+mu_reading <- mean(data$reading.score)
+mu_writing <- mean(data$writing.score)
+averages <- c(mu_math, mu_reading, mu_writing)
+averages
+```
+We can see that the average score on the math exam was lower than the other two.
+I plan on using these averages in calculations ahead, so I want a data frame with those values on each line.
+```{r averages 2}
+averages <- t(data.frame(averages, averages, averages, averages, averages, averages))
+```
+
+At this point I began looking at the different predictors we have access to. I separated them one at a time to see if any had a particularly strong impact on the scores. In each case, the delta values I looked at in the end are the deviations from the average. A positive number indicates higher than average.
+```{r gender}
+gender_averages <- data %>% group_by(gender) %>% summarize(math.gender = mean(math.score), reading.gender = mean(reading.score), writing.gender = mean(writing.score))
+gender_labels <- gender_averages[,1]
+gender_delta <- gender_averages[,2:4] - averages[1:2,]
+gender_delta <- bind_cols(gender_labels, gender_delta)
+gender_delta
+```
+Here we see that female students are below average in math but above in reading and writing while male students are the reverse.
+```{r race}
+race_averages <- data %>% group_by(race.ethnicity) %>% summarize(math.race = mean(math.score), reading.race = mean(reading.score), writing.race = mean(writing.score))
+race_labels <- race_averages[,1]
+race_delta <- race_averages[,2:4] - averages[1:5,]
+race_delta <- bind_cols(race_labels, race_delta)
+race_delta
+```
+Looking at the race information, we can see that groups A and B are below average in everything while D and E are above. One might guess which races are which at this point, but I will refrain from making assumptions based on stereotypes.
+```{r parental education}
+parent_averages <- data %>% group_by(parental.level.of.education) %>% summarize(math.parent = mean(math.score), reading.parent = mean(reading.score), writing.parent = mean(writing.score))
+parent_labels <- parent_averages[,1]
+parent_delta <- parent_averages[,2:4] - averages[1:6,]
+parent_delta <- bind_cols(parent_labels, parent_delta)
+parent_delta
+```
+Although this is ordered alphabetically rather than in terms of increasing education, we see that the expected is true. On average, parents who are more educated have higher performing children. 
+```{r lunch}
+lunch_averages <- data %>% group_by(lunch) %>% summarize(math.lunch = mean(math.score), reading.lunch = mean(reading.score), writing.lunch = mean(writing.score))
+lunch_labels <-lunch_averages[,1]
+lunch_delta <- lunch_averages[,2:4] - averages[1:2,]
+lunch_delta <- bind_cols(lunch_labels, lunch_delta)
+lunch_delta
+```
+Here we see that there is a rather large discrepency between those who are on free/reduced lunch and those who are not. This may be why this is a demographic of particular interest to schools.
+```{r prep course}
+prep_averages <- data %>% group_by(test.preparation.course) %>% summarize(math.prep = mean(math.score), reading.prep = mean(reading.score), writing.prep = mean(writing.score))
+prep_labels <-prep_averages[,1]
+prep_delta <- prep_averages[,2:4] - averages[1:2,]
+prep_delta <- bind_cols(prep_labels, prep_delta)
+prep_delta
+```
+Once again we see the expected results. Those students who completed a prep course performed better than those who did not. This is most noticeable in the writing category.
+
+I'm going to the RMSE metric to decide which method is best. I had explord using another method, the percentage of predictions within 5, 10, and 20 points of the true value, but this value did not significantly change in my tests, so I will omit it. 
+```{r rmse definition}
+RMSE <- function(x, y){sqrt(mean((x-y)^2))}
+```
+## Methods
+
+### Method 0
+As a baseline, I'm going to call Method 0 "Just the Averages" and predict the math average for all math exams, reading average for all reading exams, etc. 
+```{r method 0}
+results <- data.frame(method = "Just the Average", math_rmse = RMSE(mu_math, further_test_set$math.score), reading_rmse = RMSE(mu_reading, further_test_set$reading.score), writing_rmse = RMSE(mu_writing, further_test_set$writing.score))
+
+results
+```
+So here we see that the RMSE of this method is between 15 and 16 for the different subjects. My goal is to improve this in other methods.
+
+### Method 1: Factor Averages
+
+Seeing as how I have calculated the average impact of each factor on scores, I thought we might sum these for each student in order to predict their grades. To do this, I will add columns to the further_test_set for each of the predictors. I will then sum these along with the average for the appropriate subject to make my prediction.
+
+```{r Method 1}
+further_test_set <- further_test_set %>% left_join(gender_delta, by = 'gender') %>% 
+  left_join(race_delta, by = 'race.ethnicity') %>%
+  left_join(parent_delta, by= 'parental.level.of.education') %>%
+  left_join(lunch_delta, by = 'lunch') %>%
+  left_join(prep_delta, by = 'test.preparation.course')
+math_pred <- further_test_set %>%  mutate(pred = mu_math + math.gender + math.parent + math.race + math.lunch + math.prep) %>% .$pred
+reading_pred <- further_test_set %>% mutate(pred = mu_reading + reading.gender + reading.race + reading.parent + reading.lunch + reading.prep) %>% .$pred
+writing_pred <- further_test_set %>% mutate(pred = mu_writing + writing.gender + writing.race + writing.parent + writing.lunch + writing.prep) %>% .$pred
+results <- bind_rows(results, data.frame(method = "Factor Averages", math_rmse = RMSE(math_pred, further_test_set$math.score), reading_rmse = RMSE(reading_pred, further_test_set$reading.score), writing_rmse = RMSE(writing_pred, further_test_set$writing.score)))
+results
+```
+We see a distinct improvement here, getting the RMSEs down by a couple of points.
+
+### Method 2: Regression Tree
+Another method to try is a Regression Tree. For this one, I wanted to separate out the different subjects so that they wouldn't be confused for predictors. I ran each one individually through rpart and then used them to make predictions and found the associated RMSEs.
+```{r Mthod 2}
+just_math <- select(data, -c(reading.score, writing.score))
+just_reading <- select(data, -c(math.score, writing.score))
+just_writing <- select(data, -c(math.score, reading.score))
+
+fit_math <- rpart(math.score ~., data = just_math)
+tree_math <- predict(fit_math, further_test_set)
+
+fit_reading <- rpart(reading.score ~., data = just_reading)
+tree_reading <- predict(fit_reading, further_test_set)
+
+fit_writing <- rpart(writing.score ~., data = just_writing)
+tree_writing <- predict(fit_writing, further_test_set)
+
+tree_rmse <- c(RMSE(tree_math, further_test_set$math.score), RMSE(tree_reading, further_test_set$reading.score), RMSE(tree_writing, further_test_set$writing.score))
+results <- bind_rows(results, data.frame(method = "Tree", math_rmse = tree_rmse[1], 
+                                         reading_rmse = tree_rmse[2], 
+                                         writing_rmse = tree_rmse[3]))
+results[2:3,]
+```
+Here we see that our predictions for math and reading are worse across the board, though reading and writing are not far off. Perhaps a random forest would improve upon this?
+
+### Method 3: Random Forest
+```{r Method 3}
+rf_fit_math <- randomForest(math.score ~ ., data = just_math)
+rf_pred_math <- predict(rf_fit_math, further_test_set)
+rf_fit_reading <- randomForest(reading.score ~., data = just_reading)
+rf_pred_reading <- predict(rf_fit_reading, further_test_set)
+rf_fit_writing <- randomForest(writing.score ~., data = just_writing)
+rf_pred_writing <- predict(rf_fit_writing, further_test_set)
+#
+results <- bind_rows(results, data.frame(method = "Random Forest", 
+                                         math_rmse = RMSE(rf_pred_math, further_test_set$math.score), 
+                                         reading_rmse = RMSE(rf_pred_reading, further_test_set$reading.score), 
+                                         writing_rmse = RMSE(rf_pred_writing, further_test_set$writing.score)))
+results[2:4,]
+```
+Random Forests are an improvement over Regression Trees, but it's still slightly behind my Factor Averages method in math and writing and practically the same in reading.
+
+
+## Results
+In the end, I have chosen to try the Factor Averages with the real test set. 
+```{r real thing}
+mu_math2 <- mean(train_set$math.score)
+mu_reading2 <- mean(train_set$reading.score)
+mu_writing2 <- mean(train_set$writing.score)
+
+averages2 <- c(mu_math2, mu_reading2, mu_writing2)
+#I'm going to use the averages data frame ahead, so I need each row to be those three averages
+averages2 <- t(data.frame(averages2, averages2, averages2, averages2, averages2, averages2))
+
+#Computing the factor averages for use, as above
+gender_averages2 <- train_set %>% group_by(gender) %>% summarize(math.gender = mean(math.score), reading.gender = mean(reading.score), writing.gender = mean(writing.score))
+gender_delta2 <- gender_averages2[,2:4] - averages[1:2,]
+gender_delta2 <- bind_cols(gender_labels, gender_delta2)
+
+race_averages2 <- train_set %>% group_by(race.ethnicity) %>% summarize(math.race = mean(math.score), reading.race = mean(reading.score), writing.race = mean(writing.score))
+race_delta2 <- race_averages2[,2:4] - averages[1:5,]
+race_delta2 <- bind_cols(race_labels, race_delta2)
+
+
+parent_averages2 <- train_set %>% group_by(parental.level.of.education) %>% summarize(math.parent = mean(math.score), reading.parent = mean(reading.score), writing.parent = mean(writing.score))
+parent_delta2 <- parent_averages2[,2:4] - averages[1:6,]
+parent_delta2 <- bind_cols(parent_labels, parent_delta2)
+
+
+lunch_averages2 <- train_set %>% group_by(lunch) %>% summarize(math.lunch = mean(math.score), reading.lunch = mean(reading.score), writing.lunch = mean(writing.score))
+lunch_delta2 <- lunch_averages2[,2:4] - averages[1:2,]
+lunch_delta2 <- bind_cols(lunch_labels, lunch_delta2)
+
+
+prep_averages2 <- train_set %>% group_by(test.preparation.course) %>% summarize(math.prep = mean(math.score), reading.prep = mean(reading.score), writing.prep = mean(writing.score))
+prep_delta2 <- prep_averages2[,2:4] - averages[1:2,]
+prep_delta2 <- bind_cols(prep_labels, prep_delta2)
+
+
+#add these columns onto our test_set and make our predictions!
+test_set <- test_set %>% left_join(gender_delta2, by = 'gender') %>% 
+  left_join(race_delta2, by = 'race.ethnicity') %>%
+  left_join(parent_delta2, by= 'parental.level.of.education') %>%
+  left_join(lunch_delta2, by = 'lunch') %>%
+  left_join(prep_delta2, by = 'test.preparation.course')
+
+#now I can calculate my predictions based on the averages of the factors
+math_pred2 <- test_set %>%  mutate(pred = mu_math2 + math.gender + math.parent + math.race + math.lunch + math.prep) %>% .$pred
+reading_pred2 <- test_set %>% mutate(pred = mu_reading2 + reading.gender + reading.race + reading.parent + reading.lunch + reading.prep) %>% .$pred
+writing_pred2 <- test_set %>% mutate(pred = mu_writing2 + writing.gender + writing.race + writing.parent + writing.lunch + writing.prep) %>% .$pred
+
+
+final_results <- data.frame(method = "Factor Averages", 
+                            math_rmse = RMSE(math_pred2, test_set$math.score), 
+                            reading_rmse = RMSE(reading_pred2, test_set$reading.score), 
+                            writing_rmse = RMSE(writing_pred2, test_set$writing.score))
+
+final_results
+```
+
+I can now look a little deeper into the data and examine the other metric. I will calculate how far off each prediction was on each subject. Here is a graph of each subject's differential. In these instance, positive numbers means that we guessed too high (the student scored lower than we predicted) and vice versa.
+```{r differential calculations}
+diff_math <- math_pred2 - test_set$math.score
+diff_reading <- reading_pred2 - test_set$reading.score
+diff_writing <- writing_pred2 - test_set$writing.score
+```
+```{r math histogram, echo=FALSE}
+hist(diff_math)
+```
+
+```{r reading histogram, echo=FALSE}
+hist(diff_reading)
+```
+
+```{r writing histogram, echo=FALSE}
+hist(diff_writing)
+```
+
+Each of these shows the distribution of how far off our predictions were. We can see that our estimates peak slightly below the actual value, meaning that the largest chunk of students score slightly better than we predicted. That being said, none of the graphs show distributions that are very far off center. These graphs are useful visuals, but I also want to look at the decimal representations of how close we were.
+
+```{r differential decimals}
+diff_summary <- data.frame(subject = "math", "within 5" = mean(abs(diff_math) <=5), "within 10" = mean(abs(diff_math) <=10), "within 20" = mean(abs(diff_math) <=20))
+diff_summary <- bind_rows(diff_summary, data.frame(subject = "reading", "within 5" = mean(abs(diff_reading) <=5), "within 10" = mean(abs(diff_reading) <=10), "within 20" = mean(abs(diff_reading) <=20)))
+diff_summary <- bind_rows(diff_summary, data.frame(subject = "writing", "within 5" = mean(abs(diff_writing) <=5), "within 10" = mean(abs(diff_writing) <=10), "within 20" = mean(abs(diff_writing) <=20)))
+diff_summary
+```
+
+Here we can see that our predictions only fell within 10 points of the actual value between 50% and 60% of the time. This means that if we predicted that a student was going to earn a C or a D on an exam, there was only a 50-60% chance that we were right. That's really not very good. As I said earlier, I did not include this metric in the rest of this report because the numbers changed very little as I tried different methods.
+
+## Conclusion
+These are the best RMSE numbers we've seen so far, but they're still larger than I'd like. I think that there are a few things to consider when looking at the results: 
+
+First, it is a relatively small data set, only 1000 students. If we had significanatly more data, I would have tried separating things so that we could calculate an average for each combination of factors (for example, we could calculate the average of female students of race C whose parents have a bachelor's degree, who does not qualify for free lunch, and who has not completed a prep class), but I felt that there was insufficient data for this approach. 
+
+Second, it may well be that there is no "good" method for predicting student success from these factors. The education world is well aware of many of the trends discovered here, but as any teacher will tell you, there are exceptions to these trends, sometimes more so than the norm. While closing acheivement gaps is an important task, targeting students based solely on their race or parents' education is going to unnecessarily catch students who don't require intervention as well as miss other students who do. I think that a better way to target students for intervention is to ask the student's teachers and to get to know the students individually (which, admittedly, takes longer than looking at their demographic information) and to give them appropriate help. It isn't the answer that people want, but it's the answer that we have. 
+
+
+```{r tidyup, include = FALSE}
+options(warn = default_warning)
+```
+
