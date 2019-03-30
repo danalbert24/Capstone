@@ -93,7 +93,7 @@ prep_delta
 ```
 Once again we see the expected results. Those students who completed a prep course performed better than those who did not. This is most noticeable in the writing category.
 
-I'm going to the RMSE metric to decide which method is best. I had explord using another method, the percentage of predictions within 5, 10, and 20 points of the true value, but this value did not significantly change in my tests, so I will omit it. 
+I'm going to the RMSE metric to decide which method is best. I had explored using another method, the percentage of predictions within 5, 10, and 20 points of the true value, but this value did not significantly change in my tests, so I will omit it. 
 ```{r rmse definition}
 RMSE <- function(x, y){sqrt(mean((x-y)^2))}
 ```
